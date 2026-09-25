@@ -58,6 +58,12 @@ if os.environ.get("USE_SQLITE", "").lower() in ("1", "true", "yes"):
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
+            # 并发写入时让后到的写事务等待而非立刻 "database is locked"，
+            # 唯一约束冲突仍以 IntegrityError 形式抛给视图处理。
+            "OPTIONS": {
+                "timeout": 20,
+                "transaction_mode": "IMMEDIATE",
+            },
         }
     }
 else:

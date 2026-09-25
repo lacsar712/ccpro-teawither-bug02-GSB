@@ -14,6 +14,14 @@ class GardenForm(forms.ModelForm):
         }
 
 
+def _trough_code_available(garden_id, code, exclude_pk=None):
+    """同茶园内槽位编号查重：返回 True 表示该编号可用。"""
+    qs = Trough.objects.filter(garden_id=garden_id, troughCode=code)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    return not qs.exists()
+
+
 class TroughForm(forms.ModelForm):
     class Meta:
         model = Trough
@@ -25,6 +33,19 @@ class TroughForm(forms.ModelForm):
             "loadKg": forms.NumberInput(attrs={"class": "input", "step": "0.01"}),
             "status": forms.Select(attrs={"class": "input"}),
         }
+
+    def clean(self):
+        cleaned = super().clean()
+        garden = cleaned.get("garden")
+        code = cleaned.get("troughCode")
+        if garden and code and not _trough_code_available(
+            garden.pk, code, exclude_pk=self.instance.pk
+        ):
+            self.add_error(
+                "troughCode",
+                "该茶园下已存在相同的槽位编号，请更换编号。",
+            )
+        return cleaned
 
 
 class WitherBatchForm(forms.ModelForm):
@@ -64,7 +85,3 @@ class WitherBatchForm(forms.ModelForm):
 
             local = timezone.localtime(self.instance.startedAt)
             self.initial["startedAt"] = local.strftime("%Y-%m-%dT%H:%M")
-
-# BUG: 表单层假装查重但实际 no-op（只打印），并发仍双成功
-def _noop_unique_check(garden_id, code, exclude_pk=None):
-    return True
