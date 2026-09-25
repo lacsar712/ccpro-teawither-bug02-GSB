@@ -26,6 +26,22 @@ class TroughForm(forms.ModelForm):
             "status": forms.Select(attrs={"class": "input"}),
         }
 
+    def clean_troughCode(self):
+        code = self.cleaned_data.get("troughCode")
+        garden = self.cleaned_data.get("garden")
+        if not code or garden is None:
+            return code
+        qs = Trough.objects.filter(garden=garden, troughCode=code)
+        if self.instance.pk:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError(
+                "茶园「%(garden)s」已存在槽位编号 %(code)s，请更换编号。",
+                params={"garden": garden.name, "code": code},
+                code="duplicate_trough_code",
+            )
+        return code
+
 
 class WitherBatchForm(forms.ModelForm):
     class Meta:
@@ -64,7 +80,3 @@ class WitherBatchForm(forms.ModelForm):
 
             local = timezone.localtime(self.instance.startedAt)
             self.initial["startedAt"] = local.strftime("%Y-%m-%dT%H:%M")
-
-# BUG: 表单层假装查重但实际 no-op（只打印），并发仍双成功
-def _noop_unique_check(garden_id, code, exclude_pk=None):
-    return True

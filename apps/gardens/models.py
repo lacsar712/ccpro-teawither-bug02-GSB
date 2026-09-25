@@ -46,8 +46,14 @@ class Trough(models.Model):
         ordering = ["garden__name", "troughCode"]
         verbose_name = "萎凋槽"
         verbose_name_plural = "萎凋槽"
-        # BUG: 唯一约束被摘掉
-        constraints = []
+        constraints = [
+            models.UniqueConstraint(
+                fields=("garden", "troughCode"),
+                name="uniq_trough_code_per_garden",
+                violation_error_code="unique_together",
+                violation_error_message="该茶园已存在相同槽位编号，请更换编号。",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.garden.name}-{self.troughCode}"

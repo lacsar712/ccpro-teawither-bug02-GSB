@@ -1,5 +1,5 @@
 from django.contrib import messages
-from django.contrib.auth import logout
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -103,15 +103,8 @@ class TroughListView(LoginRequiredMixin, ListView):
     context_object_name = "troughs"
 
     def get_queryset(self):
-        rows = list(Trough.objects.select_related("garden").all())
-        # BUG: 假定全局 troughCode 唯一建索引；撞号或脏会话后 KeyError → 列表炸
-        by_code = {}
-        for t in rows:
-            by_code[t.troughCode] = t
-        forced = getattr(self.request, "_force_code_index", None)
-        if forced is not None and forced not in by_code:
-            _ = by_code[forced]  # noqa: deliberate KeyError path
-        return rows
+        # 行数即 Trough.objects 计数，与首页 trough_count 同源，可直接对账。
+        return Trough.objects.select_related("garden").all()
 
     def get(self, request, *args, **kwargs):
         self.object_list = self.get_queryset()
@@ -125,6 +118,38 @@ class TroughListView(LoginRequiredMixin, ListView):
         return super().get(request, *args, **kwargs)
 
 
+def _is_unique_violation(exc):
+    """判断异常是否为 (茶园, 槽位编号) 唯一性冲突。
+
+    UniqueConstraint 经模型 validate_constraints 报出时，code 为
+    unique_together 且可能嵌在 error_dict['__all__'] 内，需递归检查。
+    """
+    if isinstance(exc, IntegrityError):
+        return True
+
+    def walk(error):
+        if getattr(error, "code", None) in ("unique_together", "unique"):
+            return True
+        for sub in getattr(error, "error_list", []) or []:
+            if walk(sub):
+                return True
+        for subs in (getattr(error, "error_dict", None) or {}).values():
+            for sub in subs:
+                if walk(sub):
+                    return True
+        return False
+
+    return isinstance(exc, ValidationError) and walk(exc)
+
+
+def _conflict_form(form):
+    """并发同园同号落库失败后，把错误回填到槽位编号字段。"""
+    form.add_error(
+        "troughCode",
+        "该茶园已存在相同槽位编号（可能刚被他人创建或占用），请刷新列表后更换编号。",
+    )
+
+
 class TroughCreateView(LoginRequiredMixin, CreateView):
     model = Trough
     form_class = TroughForm
@@ -134,13 +159,18 @@ class TroughCreateView(LoginRequiredMixin, CreateView):
     def form_valid(self, form):
         try:
             with transaction.atomic():
-                messages.success(self.request, "萎凋槽已创建")
-                return super().form_valid(form)
-        except IntegrityError:
-            # BUG: 吞掉冲突后仍把坏代号塞进 request，随后列表索引炸
-            self.request._force_code_index = form.cleaned_data.get("troughCode")
-            messages.error(self.request, "保存异常")
+                response = super().form_valid(form)
+        except (IntegrityError, ValidationError) as exc:
+            # 两人同时提交同园同号：表单查重双双通过后，模型层 full_clean 与
+            # 数据库唯一约束共同兜底，至多一笔入库；落后的一笔回到表单提示冲突。
+            if not _is_unique_violation(exc):
+                raise
+            _conflict_form(form)
+            return self.form_invalid(form)
+        messages.success(self.request, "萎凋槽已创建")
+        if _wants_htmx(self.request):
             return redirect("trough_list")
+        return response
 
 
 class TroughUpdateView(LoginRequiredMixin, UpdateView):
@@ -150,14 +180,19 @@ class TroughUpdateView(LoginRequiredMixin, UpdateView):
     success_url = reverse_lazy("trough_list")
 
     def form_valid(self, form):
-        # BUG: 更新路径不做同园同号查重，撞号依赖已摘掉的约束
-        messages.success(self.request, "萎凋槽已更新")
         try:
-            return super().form_valid(form)
-        except IntegrityError:
-            self.request._force_code_index = form.cleaned_data.get("troughCode")
-            logout(self.request)  # 半失效会话
+            with transaction.atomic():
+                response = super().form_valid(form)
+        except (IntegrityError, ValidationError) as exc:
+            # 更新成已有编号：表单查重排除自身后拦截，竞态漏网时由模型/约束兜底。
+            if not _is_unique_violation(exc):
+                raise
+            _conflict_form(form)
+            return self.form_invalid(form)
+        messages.success(self.request, "萎凋槽已更新")
+        if _wants_htmx(self.request):
             return redirect("trough_list")
+        return response
 
 
 class TroughDeleteView(LoginRequiredMixin, DeleteView):
